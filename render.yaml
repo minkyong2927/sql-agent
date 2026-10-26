@@ -1,0 +1,25 @@
+# Render 배포 설정 (Blueprint): 저장소를 연결하면 이 파일대로 서비스가 만들어짐
+services:
+  - type: web
+    name: sql-agent
+    runtime: docker            # Dockerfile 로 빌드
+    plan: free
+    region: singapore          # 한국에서 가장 가까운 지역
+    branch: main
+    autoDeploy: true           # main 에 push 하면 자동 재배포
+    healthCheckPath: /health
+    envVars:
+      # 공개 시연: Haiku만, 접속 코드 필수, 횟수 제한으로 비용 상한
+      - key: ALLOWED_MODELS
+        value: claude-haiku-5-5
+      - key: DEFAULT_MODEL
+        value: claude-haiku-5-5
+      - key: PER_IP_PER_HOUR
+        value: "10"
+      - key: DAILY_LIMIT
+        value: "100"
+      # 비밀 값: 파일에 적지 않고 Render 화면에서 직접 입력 (sync: false)
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ACCESS_CODE
+        sync: false
