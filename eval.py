@@ -177,6 +177,8 @@ def self_check():
     print(f"정답 그대로 제출   → {oracle}/{n} 통과 (기대: {n}/{n})")
     print(f"빈 답 제출         → {null}/{n} 통과 (기대: 0/{n})")
     print(f"다른 문항 답 제출  → {wrong}/{n} 통과 (기대: 0에 가까움)")
+    if oracle != n or null != 0 or wrong > 0:
+        raise SystemExit(1)  # 채점기가 이상하면 오류 코드로 끝냄 (CI가 빨간불)
 
 
 def main():

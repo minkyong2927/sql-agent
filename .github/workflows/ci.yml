@@ -1,0 +1,38 @@
+# push·PR 때마다 무료 테스트를 자동 실행 (실제 Claude API는 부르지 않음)
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONIOENCODING: utf-8
+      ANTHROPIC_API_KEY: dummy-key-for-ci  # 클라이언트 생성용 가짜 키 (실제 호출 없음)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: 패키지 설치
+        run: python -m pip install -r requirements.txt
+
+      - name: DB 생성 (가상 데이터)
+        run: |
+          python schema.py
+          python seed.py
+
+      - name: SQL 안전장치 테스트
+        run: python test_guard.py
+
+      - name: API 서버 테스트 (AI 호출은 가짜)
+        run: python test_app.py
+
+      - name: 채점기 점검 (정답 100%, 빈 답 0%)
+        run: python eval.py --check

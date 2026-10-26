@@ -34,3 +34,5 @@ for name, sql, should_pass in CASES:
     print(f"{'O' if ok else 'X'} {name:12s} → {detail}")
 
 print(f"\n{passed}/{len(CASES)} 통과")
+if passed != len(CASES):
+    raise SystemExit(1)  # 하나라도 실패하면 오류 코드로 끝냄 (CI가 빨간불)

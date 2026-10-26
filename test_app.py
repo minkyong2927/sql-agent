@@ -56,3 +56,5 @@ r = client.get("/")
 check("화면 HTML", r.status_code == 200 and "데이터 질의 에이전트" in r.text)
 
 print(f"\n{sum(checks)}/{len(checks)} 통과")
+if not all(checks):
+    raise SystemExit(1)  # 하나라도 실패하면 오류 코드로 끝냄 (CI가 빨간불)
