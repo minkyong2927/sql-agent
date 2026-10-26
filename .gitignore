@@ -1,0 +1,8 @@
+# API 키가 든 파일: 절대 GitHub에 올리지 않음
+.env
+
+venv/
+__pycache__/
+*.duckdb
+*.duckdb.wal
+runs/*/traces/
