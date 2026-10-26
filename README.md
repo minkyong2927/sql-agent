@@ -1,5 +1,6 @@
 # 데이터 질의 에이전트 (text-to-SQL)
-n[![CI](https://github.com/minkyong2927/sql-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/minkyong2927/sql-agent/actions/workflows/ci.yml)
+
+[![CI](https://github.com/minkyong2927/sql-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/minkyong2927/sql-agent/actions/workflows/ci.yml)
 
 통신·렌탈 가입 중개 서비스의 운영 데이터를 말로 물으면, Claude가 SQL을 짜서 실행하고 결과를 근거로 답하는 에이전트.
 
