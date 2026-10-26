@@ -1,0 +1,11 @@
+# API 키: 이미지 안에 절대 넣지 않음 (배포 환경변수로 주입)
+.env
+
+venv/
+__pycache__/
+*.duckdb
+*.duckdb.wal
+runs/
+practice/
+.git/
+.github/

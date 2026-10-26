@@ -36,3 +36,29 @@ jobs:
 
       - name: 채점기 점검 (정답 100%, 빈 답 0%)
         run: python eval.py --check
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 이미지 빌드
+        run: docker build -t sql-agent .
+
+      - name: 컨테이너 실행 후 응답 확인
+        run: |
+          docker run -d --name app -p 8000:8000 \
+            -e ANTHROPIC_API_KEY=dummy-key-for-ci -e ACCESS_CODE=ci-code sql-agent
+          for i in $(seq 1 30); do curl -sf http://localhost:8000/health && break; sleep 1; done
+          curl -sf http://localhost:8000/health | grep -q '"ok"'
+          curl -sf http://localhost:8000/ | grep -q "데이터 질의 에이전트"
+          # 접속 코드 없이 질문하면 401 이어야 함
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8000/ask \
+            -H 'Content-Type: application/json' -d '{"question":"고객 수?"}')" = "401"
+          # 이미지 안에 .env 가 없어야 함
+          ! docker exec app test -f /app/.env
+
+      - name: 실패 시 컨테이너 로그
+        if: failure()
+        run: docker logs app || true
