@@ -22,9 +22,10 @@
 | `guard.py` | sqlglot 기반 SQL 검사: 한 문장·조회문만, 금지 명령 차단, 테이블 허용 목록(파일 읽기 차단), LIMIT 강제 |
 | `questions.py` | 평가 문항 40개 + 정답 SQL (쉬움 8 · 보통 10 · 어려움 12 · 함정 10) |
 | `eval.py` | 평가 실행기: 답변 정답 / SQL 결과 정답 2종 채점, 병렬 실행, 문항별 결과·대화 기록 저장 |
+| `router.py` | 난이도 분류 → 모델·사고량·SQL 실행 한도 배정, 실패 시 Opus 승급 |
 | `judge.py` | LLM 채점기 (Sonnet 5.5): 핵심 값 일치 + 결론 명확성 판정, 알려진 정답·오답 162건으로 채점기 자체 검증 |
 | `app.py` | FastAPI 서버 (`POST /ask`, `GET /health`, 시연 화면 `/`) |
-| `test_*.py` | 안전장치 15건, API 17건 테스트 (API 테스트는 AI 호출을 가짜로 바꿔 무료) |
+| `test_*.py` | 안전장치 15건, API 17건, 승급 판단 7건 테스트 (API 테스트는 AI 호출을 가짜로 바꿔 무료) |
 | `Dockerfile` / `render.yaml` | 컨테이너 이미지(빌드 시 DB 생성, 비root 실행) + Render 배포 설정 (접속 코드, IP당 시간 10회·하루 100회 제한) |
 
 ## 안전장치
@@ -88,6 +89,29 @@
 - 입력의 약 87%가 캐시에서 읽힘. 남은 비용은 대부분 출력 토큰(Haiku 74%, Opus 73%)
 - 정답 수 차이는 캐싱과 무관한 해석 차이: 10번은 두 모델 모두 취소를 뺀 분모(701건 중 208건)로 같은 비율 29.7%를 냄, 19번 Opus는 다른 기준 금액을 주 답으로 냄
 
+### 난이도별 실행 예산 (router.py)
+
+Haiku가 질문을 simple / complex로 분류하고, 난이도마다 예산을 다르게 줌. 예산 안에서 답을 못 내면(실행 한도 초과, SQL 전부 실패, 거절) Opus로 승급.
+
+| 난이도 | 모델 | 사고량(effort) | SQL 실행 한도 |
+|---|---|---|---|
+| simple | Haiku | low | 3회 |
+| complex | Haiku | medium | 6회 |
+| 승급 | Opus | medium | 8회 |
+
+40문항 전체, 캐싱 켬, 각 1회:
+
+| 방식 | LLM 채점 | 규칙 채점 | 비용 | 문항당 시간 |
+|---|---|---|---|---|
+| Opus만 | 39/40 | — | $0.651 | 8.0초 |
+| Haiku만 | 39/40 | — | $0.015 | 4.4초 |
+| 난이도별 예산 (auto) | 40/40 | 38/40 | $0.019 | 6.3초 |
+
+- 분류 결과: 쉬움 8/8 simple, 함정 10/10 complex, 보통·어려움은 섞임 (보통 3·어려움 2가 simple). 승급은 0건
+- Opus만 쓰는 것보다 97% 싸지만, **Haiku만 쓰는 것보다는 비싸고 느림**. 분류 호출이 비용의 약 18%(토큰 차이로 추정), 시간 약 2초를 더함. 분류용 프롬프트는 캐시 최소 길이(512토큰)보다 짧아 캐싱도 안 됨
+- 이 데이터에서는 Haiku가 이미 거의 다 맞혀서 분류로 아낄 몫이 작음 → 분류 없이 Haiku로 시작해 실패 신호가 있을 때만 승급하는 cascade(`--model cascade`)가 더 맞는 구조로 보임. **cascade 측정은 API 크레딧 소진으로 미실행**
+- 승급 판단 규칙은 `test_router.py`로 API 없이 테스트 (CI 포함)
+
 ## 실행
 
 ```
@@ -105,6 +129,7 @@ python eval.py --check                  # 채점기 점검 (무료)
 python eval.py --model claude-haiku-5-5 # 평가 실행
 python eval.py --judge                  # LLM 채점까지 함께
 python judge.py --calibrate             # LLM 채점기 검증
+python eval.py --model auto             # 난이도별 실행 예산
 uvicorn app:app --reload                # http://127.0.0.1:8000
 ```
 

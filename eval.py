@@ -5,6 +5,8 @@ python eval.py --ids 1,7,9          일부 문항만 실행
 python eval.py                      30문항 전체 실행 (기본 모델 claude-opus-5-5)
 python eval.py --model claude-haiku-5-5
 python eval.py --judge               규칙 채점 + LLM 채점(judge.py) 함께
+python eval.py --model auto          난이도별 실행 예산(router.py)
+python eval.py --model cascade       분류 없이 Haiku로 시작, 실패할 때만 Opus
 """
 import argparse
 import json
@@ -141,16 +143,27 @@ def cost_usd(model, usage):
 
 def run_case(q, model, use_judge=False, cache=True):
     start = time.time()
-    out = ask(q["question"], model=model, verbose=False, cache=cache)
+    if model in ("auto", "cascade"):
+        from router import ask_auto
+        out = ask_auto(q["question"], verbose=False, route=model == "auto")
+        cost = sum(cost_usd(c["model"], c["usage"]) for c in out["calls"])
+    else:
+        out = ask(q["question"], model=model, verbose=False, cache=cache)
+        cost = cost_usd(out["model"], out["usage"])
     row = {
         "id": q["id"], "level": q["level"], "trap": q.get("trap"), "question": q["question"],
         "requested_model": model, "model": out["model"], "stop_reason": out["stop_reason"],
         "answer": out["answer"], "sql_count": len(out["sqls"]),
         "sql_errors": sum("error" in s for s in out["sqls"]),
-        "usage": out["usage"], "cost_usd": round(cost_usd(out["model"], out["usage"]), 5),
+        "usage": out["usage"], "cost_usd": round(cost, 5),
         "latency_s": round(time.time() - start, 1),
         **grade(q, out),
     }
+    if model in ("auto", "cascade"):
+        row.update({"route": out["route"], "escalated": out["escalated"],
+                    "models": [c["model"] for c in out["calls"]],
+                    "route_cost_usd": round(cost_usd(out["calls"][0]["model"], out["calls"][0]["usage"]), 6)
+                    if model == "auto" else 0})
     if use_judge:
         from judge import judge  # judge.py가 이 파일을 불러오므로 여기서 불러옴
         row.update(judge(q, out["answer"]))
@@ -252,7 +265,7 @@ def main():
                  f"{tok['cache_read_input_tokens']:,} + 캐시 쓰기 {tok['cache_creation_input_tokens']:,}, 출력 {tok['output_tokens']:,}")
     lines.append(f"- 비용: ${total_cost:.3f} (약 {total_cost * KRW_PER_USD:,.0f}원), "
                  f"문항당 평균 {sum(r['latency_s'] for r in rows) / n:.1f}초, 전체 {time.time() - start:.0f}초")
-    mismatch = [r["id"] for r in rows if r["model"] != r["requested_model"]]
+    mismatch = [r["id"] for r in rows if r["model"] != r["requested_model"] and r["requested_model"] not in ("auto", "cascade")]
     if mismatch:
         lines.append(f"- 주의: 요청과 다른 모델이 답한 문항 {mismatch}")
     lines += ["", "| 난이도 | 답변 정답 | SQL 정답 |", "|---|---|---|"]
@@ -260,6 +273,15 @@ def main():
         lv = [r for r in rows if r["level"] == level]
         if lv:
             lines.append(f"| {level} | {sum(r['answer_ok'] for r in lv)}/{len(lv)} | {sum(r['sql_ok'] for r in lv)}/{len(lv)} |")
+    if args.model in ("auto", "cascade"):
+        rc = sum(r["route_cost_usd"] for r in rows)
+        lines.append(f"- 분류 비용: ${rc:.4f} (전체의 {rc / total_cost:.0%}), Opus 승급 {sum(r['escalated'] for r in rows)}건")
+        lines += ["", "| 난이도 | simple 배정 | complex 배정 | Opus 승급 |", "|---|---|---|---|"]
+        for level in ["쉬움", "보통", "어려움", "함정"]:
+            lv = [r for r in rows if r["level"] == level]
+            if lv:
+                lines.append(f"| {level} | {sum(r['route'] == 'simple' for r in lv)} | "
+                             f"{sum(r['route'] == 'complex' for r in lv)} | {sum(r['escalated'] for r in lv)} |")
     wrong = [r for r in rows if not (r["answer_ok"] and r["sql_ok"] and r.get("judge_pass", True))]
     if wrong:
         lines += ["", "## 틀린 문항", ""]

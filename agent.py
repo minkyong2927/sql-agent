@@ -85,8 +85,9 @@ def to_text(cols, rows):
     return text
 
 
-def ask(question, model="claude-opus-5-5", verbose=True, cache=True):
-    """질문 하나를 받아 답변·실행한 SQL과 결과·토큰 사용량을 돌려줌"""
+def ask(question, model="claude-opus-5-5", verbose=True, cache=True, effort="medium", max_steps=MAX_STEPS):
+    """질문 하나를 받아 답변·실행한 SQL과 결과·토큰 사용량을 돌려줌
+    effort·max_steps: 이 질문에 쓸 실행 예산 (router.py가 난이도에 따라 정함)"""
     messages = [{"role": "user", "content": question}]
     sqls = []  # [{"query", "cols", "rows"} 또는 {"query", "error"}]
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
@@ -106,14 +107,14 @@ def ask(question, model="claude-opus-5-5", verbose=True, cache=True):
         system = [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}]
         extra["cache_control"] = {"type": "ephemeral"}
 
-    for _ in range(MAX_STEPS):
+    for _ in range(max_steps):
         response = client.beta.messages.create(
             model=model,
             max_tokens=16000,
             system=system,
             tools=TOOLS,
             messages=messages,
-            output_config={"effort": "medium"},
+            output_config={"effort": effort},
             **extra,
         )
         usage["input_tokens"] += response.usage.input_tokens

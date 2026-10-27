@@ -34,6 +34,9 @@ jobs:
       - name: API 서버 테스트 (AI 호출은 가짜)
         run: python test_app.py
 
+      - name: 승급 판단 테스트
+        run: python test_router.py
+
       - name: 채점기 점검 (정답 100%, 빈 답 0%)
         run: python eval.py --check
 
