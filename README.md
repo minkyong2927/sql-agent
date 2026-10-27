@@ -4,6 +4,8 @@
 
 통신·렌탈 가입 중개 서비스의 운영 데이터를 말로 물으면, Claude가 SQL을 짜서 실행하고 결과를 근거로 답하는 에이전트.
 
+**시연**: https://sql-agent-g25d.onrender.com (접속 코드 필요, 요청 시 전달 · Haiku 5.5 · 무료 서버라 첫 접속 시 1분 정도 대기)
+
 ```
 질문: 사은품 지급 지연된 건 몇 건이고 총 얼마야?
   → Claude: run_sql 도구로 SELECT ... FROM gift_payouts WHERE status = '지연'
@@ -21,7 +23,8 @@
 | `questions.py` | 평가 문항 40개 + 정답 SQL (쉬움 8 · 보통 10 · 어려움 12 · 함정 10) |
 | `eval.py` | 평가 실행기: 답변 정답 / SQL 결과 정답 2종 채점, 병렬 실행, 문항별 결과·대화 기록 저장 |
 | `app.py` | FastAPI 서버 (`POST /ask`, `GET /health`, 시연 화면 `/`) |
-| `test_*.py` | 안전장치 15건, API 10건 테스트 (API 테스트는 AI 호출을 가짜로 바꿔 무료) |
+| `test_*.py` | 안전장치 15건, API 17건 테스트 (API 테스트는 AI 호출을 가짜로 바꿔 무료) |
+| `Dockerfile` / `render.yaml` | 컨테이너 이미지(빌드 시 DB 생성, 비root 실행) + Render 배포 설정 (접속 코드, IP당 시간 10회·하루 100회 제한) |
 
 ## 안전장치
 
