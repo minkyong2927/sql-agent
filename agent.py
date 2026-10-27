@@ -85,11 +85,11 @@ def to_text(cols, rows):
     return text
 
 
-def ask(question, model="claude-opus-5-5", verbose=True):
+def ask(question, model="claude-opus-5-5", verbose=True, cache=True):
     """질문 하나를 받아 답변·실행한 SQL과 결과·토큰 사용량을 돌려줌"""
     messages = [{"role": "user", "content": question}]
     sqls = []  # [{"query", "cols", "rows"} 또는 {"query", "error"}]
-    usage = {"input_tokens": 0, "output_tokens": 0}
+    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
     out = {"answer": "SQL 실행 횟수 한도를 넘었습니다.", "sqls": sqls, "usage": usage,
            "model": model, "stop_reason": "max_steps", "messages": messages}
 
@@ -98,11 +98,19 @@ def ask(question, model="claude-opus-5-5", verbose=True):
     if model.startswith("claude-opus"):
         extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
 
+    # 프롬프트 캐싱: 도구 정의 + 시스템 프롬프트(스키마)는 모든 질문에서 똑같음
+    # → 끝에 표시를 달아 두 번째 요청부터는 캐시에서 읽음 (읽기 가격은 입력의 0.05~0.1배)
+    # 위쪽 cache_control(자동)은 질문 안에서 SQL을 여러 번 돌릴 때 앞선 대화까지 캐시함
+    system = SYSTEM
+    if cache:
+        system = [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}]
+        extra["cache_control"] = {"type": "ephemeral"}
+
     for _ in range(MAX_STEPS):
         response = client.beta.messages.create(
             model=model,
             max_tokens=16000,
-            system=SYSTEM,
+            system=system,
             tools=TOOLS,
             messages=messages,
             output_config={"effort": "medium"},
@@ -110,6 +118,8 @@ def ask(question, model="claude-opus-5-5", verbose=True):
         )
         usage["input_tokens"] += response.usage.input_tokens
         usage["output_tokens"] += response.usage.output_tokens
+        usage["cache_read_input_tokens"] += response.usage.cache_read_input_tokens or 0
+        usage["cache_creation_input_tokens"] += response.usage.cache_creation_input_tokens or 0
         out["model"] = response.model  # 실제로 답한 모델 (요청한 모델과 다를 수 있음)
         # AI의 응답(SQL 요청 포함)을 대화 기록에 그대로 붙임
         messages.append({"role": "assistant", "content": response.content})

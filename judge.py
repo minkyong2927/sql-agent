@@ -17,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from agent import client, to_text
-from eval import PRICES, KRW_PER_USD, answer_score, gold_result, grade
+from eval import KRW_PER_USD, answer_score, cost_usd, gold_result, grade
 from questions import QUESTIONS
 
 # 평가 대상(Opus·Haiku)과 다른 모델로 채점: 같은 모델이면 자기 답을 후하게 볼 수 있음
@@ -95,11 +95,7 @@ def judge(q, answer, model=JUDGE_MODEL):
 
 
 def judge_cost(rows):
-    total = 0
-    for r in rows:
-        p_in, p_out = PRICES.get(r["judge_model"], (0, 0))
-        total += (r["judge_usage"]["input_tokens"] * p_in + r["judge_usage"]["output_tokens"] * p_out) / 1e6
-    return total
+    return sum(cost_usd(r["judge_model"], r["judge_usage"]) for r in rows)
 
 
 # ---------- 채점기 검증 ----------

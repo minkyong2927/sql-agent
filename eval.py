@@ -19,11 +19,11 @@ from pathlib import Path
 from agent import ask, con, to_text
 from questions import QUESTIONS
 
-# 100만 토큰당 달러 (입력, 출력)
+# 100만 토큰당 달러 (입력, 출력, 캐시 읽기). 캐시 쓰기는 입력의 1.25배
 PRICES = {
-    "claude-opus-5-5": (4.00, 20.00),
-    "claude-sonnet-5-5": (2.00, 10.00),
-    "claude-haiku-5-5": (0.10, 0.50),
+    "claude-opus-5-5": (4.00, 20.00, 0.20),
+    "claude-sonnet-5-5": (2.00, 10.00, 0.20),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),
 }
 KRW_PER_USD = 1400  # 대략적인 환율 (원 환산 참고용)
 
@@ -133,13 +133,15 @@ def trace_of(out):
 
 
 def cost_usd(model, usage):
-    p_in, p_out = PRICES.get(model, (0, 0))
-    return (usage["input_tokens"] * p_in + usage["output_tokens"] * p_out) / 1e6
+    p_in, p_out, p_read = PRICES.get(model, (0, 0, 0))
+    return (usage["input_tokens"] * p_in + usage["output_tokens"] * p_out
+            + usage.get("cache_read_input_tokens", 0) * p_read
+            + usage.get("cache_creation_input_tokens", 0) * p_in * 1.25) / 1e6
 
 
-def run_case(q, model, use_judge=False):
+def run_case(q, model, use_judge=False, cache=True):
     start = time.time()
-    out = ask(q["question"], model=model, verbose=False)
+    out = ask(q["question"], model=model, verbose=False, cache=cache)
     row = {
         "id": q["id"], "level": q["level"], "trap": q.get("trap"), "question": q["question"],
         "requested_model": model, "model": out["model"], "stop_reason": out["stop_reason"],
@@ -192,6 +194,8 @@ def main():
     ap.add_argument("--workers", type=int, default=4, help="동시에 돌릴 문항 수")
     ap.add_argument("--check", action="store_true", help="채점기 점검만 (API 호출 없음)")
     ap.add_argument("--judge", action="store_true", help="LLM 채점도 함께 (Sonnet, 문항당 약 $0.004)")
+    ap.add_argument("--no-cache", action="store_true", help="프롬프트 캐싱 끄기 (비교용)")
+    ap.add_argument("--tag", default="", help="실행 폴더 이름 뒤에 붙일 설명")
     args = ap.parse_args()
 
     if args.check:
@@ -203,13 +207,13 @@ def main():
         ids = {int(x) for x in args.ids.split(",")}
         qs = [q for q in QUESTIONS if q["id"] in ids]
 
-    run_dir = Path("runs") / f"{datetime.now():%m%d-%H%M%S}_{args.model}"
+    run_dir = Path("runs") / f"{datetime.now():%m%d-%H%M%S}_{args.model}{'-' + args.tag if args.tag else ''}"
     (run_dir / "traces").mkdir(parents=True, exist_ok=True)
     print(f"{len(qs)}문항 × {args.model} → {run_dir}")
 
     rows, start = [], time.time()
     with ThreadPoolExecutor(args.workers) as pool:
-        futures = {pool.submit(run_case, q, args.model, args.judge): q for q in qs}
+        futures = {pool.submit(run_case, q, args.model, args.judge, not args.no_cache): q for q in qs}
         for f in as_completed(futures):
             q = futures[f]
             try:
@@ -242,6 +246,10 @@ def main():
         from judge import judge_cost
         jc = judge_cost(rows)
         lines.append(f"- LLM 채점 통과: {sum(r['judge_pass'] for r in rows)}/{n} (채점 비용 ${jc:.3f} 별도)")
+    tok = {k: sum(r["usage"].get(k, 0) for r in rows) for k in
+           ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"]}
+    lines.append(f"- 캐싱: {'끔' if args.no_cache else '켬'} · 입력 토큰 {tok['input_tokens']:,} + 캐시 읽기 "
+                 f"{tok['cache_read_input_tokens']:,} + 캐시 쓰기 {tok['cache_creation_input_tokens']:,}, 출력 {tok['output_tokens']:,}")
     lines.append(f"- 비용: ${total_cost:.3f} (약 {total_cost * KRW_PER_USD:,.0f}원), "
                  f"문항당 평균 {sum(r['latency_s'] for r in rows) / n:.1f}초, 전체 {time.time() - start:.0f}초")
     mismatch = [r["id"] for r in rows if r["model"] != r["requested_model"]]
