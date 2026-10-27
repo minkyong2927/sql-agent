@@ -4,6 +4,7 @@ python eval.py --check              채점기 자체 점검 (API 호출 없음, 
 python eval.py --ids 1,7,9          일부 문항만 실행
 python eval.py                      30문항 전체 실행 (기본 모델 claude-opus-5-5)
 python eval.py --model claude-haiku-5-5
+python eval.py --judge               규칙 채점 + LLM 채점(judge.py) 함께
 """
 import argparse
 import json
@@ -136,7 +137,7 @@ def cost_usd(model, usage):
     return (usage["input_tokens"] * p_in + usage["output_tokens"] * p_out) / 1e6
 
 
-def run_case(q, model):
+def run_case(q, model, use_judge=False):
     start = time.time()
     out = ask(q["question"], model=model, verbose=False)
     row = {
@@ -148,6 +149,9 @@ def run_case(q, model):
         "latency_s": round(time.time() - start, 1),
         **grade(q, out),
     }
+    if use_judge:
+        from judge import judge  # judge.py가 이 파일을 불러오므로 여기서 불러옴
+        row.update(judge(q, out["answer"]))
     return row, trace_of(out)
 
 
@@ -187,6 +191,7 @@ def main():
     ap.add_argument("--ids", help="쉼표로 구분한 문항 번호 (예: 1,7,9)")
     ap.add_argument("--workers", type=int, default=4, help="동시에 돌릴 문항 수")
     ap.add_argument("--check", action="store_true", help="채점기 점검만 (API 호출 없음)")
+    ap.add_argument("--judge", action="store_true", help="LLM 채점도 함께 (Sonnet, 문항당 약 $0.004)")
     args = ap.parse_args()
 
     if args.check:
@@ -204,7 +209,7 @@ def main():
 
     rows, start = [], time.time()
     with ThreadPoolExecutor(args.workers) as pool:
-        futures = {pool.submit(run_case, q, args.model): q for q in qs}
+        futures = {pool.submit(run_case, q, args.model, args.judge): q for q in qs}
         for f in as_completed(futures):
             q = futures[f]
             try:
@@ -221,7 +226,8 @@ def main():
             (run_dir / "traces" / f"{q['id']}.json").write_text(
                 json.dumps(trace, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
             mark = "O" if row["answer_ok"] else "X"
-            print(f"  [{q['id']:2d}] {mark} SQL{'O' if row['sql_ok'] else 'X'} "
+            jmark = f" LLM{'O' if row['judge_pass'] else 'X'}" if "judge_pass" in row else ""
+            print(f"  [{q['id']:2d}] {mark} SQL{'O' if row['sql_ok'] else 'X'}{jmark} "
                   f"{row['latency_s']:5.1f}s ${row['cost_usd']:.4f}  {q['question']}")
 
     if not rows:
@@ -232,6 +238,10 @@ def main():
     lines = [f"# {args.model} — {n}문항", ""]
     lines.append(f"- 답변 정답: **{sum(r['answer_ok'] for r in rows)}/{n}**")
     lines.append(f"- SQL 결과 정답: {sum(r['sql_ok'] for r in rows)}/{n}")
+    if args.judge:
+        from judge import judge_cost
+        jc = judge_cost(rows)
+        lines.append(f"- LLM 채점 통과: {sum(r['judge_pass'] for r in rows)}/{n} (채점 비용 ${jc:.3f} 별도)")
     lines.append(f"- 비용: ${total_cost:.3f} (약 {total_cost * KRW_PER_USD:,.0f}원), "
                  f"문항당 평균 {sum(r['latency_s'] for r in rows) / n:.1f}초, 전체 {time.time() - start:.0f}초")
     mismatch = [r["id"] for r in rows if r["model"] != r["requested_model"]]
@@ -242,13 +252,15 @@ def main():
         lv = [r for r in rows if r["level"] == level]
         if lv:
             lines.append(f"| {level} | {sum(r['answer_ok'] for r in lv)}/{len(lv)} | {sum(r['sql_ok'] for r in lv)}/{len(lv)} |")
-    wrong = [r for r in rows if not (r["answer_ok"] and r["sql_ok"])]
+    wrong = [r for r in rows if not (r["answer_ok"] and r["sql_ok"] and r.get("judge_pass", True))]
     if wrong:
         lines += ["", "## 틀린 문항", ""]
         for r in wrong:
             trap = f" ({r['trap']})" if r.get("trap") else ""
             lines.append(f"- [{r['id']}]{trap} {r['question']} — 답변 {'O' if r['answer_ok'] else 'X'}, "
                          f"SQL {'O' if r['sql_ok'] else 'X'}, 빠진 값: {', '.join(r['missing']) or '-'}")
+            if "judge_reason" in r:
+                lines.append(f"  - LLM 채점 {'O' if r['judge_pass'] else 'X'}: {r['judge_reason']}")
     summary = "\n".join(lines)
     (run_dir / "summary.md").write_text(summary, encoding="utf-8")
     print("\n" + summary)
