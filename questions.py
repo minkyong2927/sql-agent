@@ -237,7 +237,7 @@ QUESTIONS = [
     {
         "id": 20,
         "level": "보통",
-        "question": "렌탈에 관심 있다고 상담 신청한 건 중 실제 가입까지 간 건은 몇 건이야?",
+        "question": "렌탈에 관심 있다고 상담 신청한 건 중 가입 신청까지 간 건은 몇 건이야? 나중에 취소된 건도 포함해서",
         "sql": """
             SELECT COUNT(DISTINCT ap.application_id) AS 가입수
             FROM consultation_requests AS r
@@ -444,7 +444,7 @@ QUESTIONS = [
         "id": 36,
         "level": "함정",
         "trap": "증가율 계산",
-        "question": "9월 대비 10월 가입 신청 건수 증가율(%)은? 소수 첫째 자리까지",
+        "question": "9월 대비 10월 가입 신청 건수 증가율(%)은? 10월은 데이터가 있는 날까지 쌓인 건수 그대로 비교, 소수 첫째 자리까지",
         "sql": """
             SELECT ROUND((oct - sep) * 100.0 / sep, 1) AS 증가율
             FROM (
