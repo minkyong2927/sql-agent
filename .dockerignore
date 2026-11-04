@@ -9,3 +9,5 @@ runs/
 practice/
 .git/
 .github/
+# 임베딩 모델 파일 (받아서 씀, 0.5GB)
+.models/

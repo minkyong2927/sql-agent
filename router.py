@@ -69,7 +69,7 @@ def merge_usage(calls):
     return {k: sum(c["usage"].get(k, 0) for c in calls) for k in keys}
 
 
-def ask_auto(question, verbose=True, allow_escalation=True, route=True):
+def ask_auto(question, verbose=True, allow_escalation=True, route=True, knowledge="rag"):
     """난이도 분류 → 예산대로 실행 → 필요하면 승급. 비용 계산용으로 호출별 모델·토큰(calls)을 남김"""
     if route:
         level, reason, router_call = classify(question)
@@ -79,14 +79,14 @@ def ask_auto(question, verbose=True, allow_escalation=True, route=True):
     budget = BUDGETS[level]
     if verbose:
         print(f"[분류] {level} — {reason}\n[예산] {budget}")
-    out = ask(question, verbose=verbose, **budget)
+    out = ask(question, verbose=verbose, knowledge=knowledge, **budget)
     calls.append({"model": out["model"], "usage": out["usage"]})
     escalated = False
     if allow_escalation and needs_escalation(out):
         escalated = True
         if verbose:
             print(f"[승급] {out['stop_reason']}, SQL {len(out['sqls'])}회 → {ESCALATION}")
-        out = ask(question, verbose=verbose, **ESCALATION)
+        out = ask(question, verbose=verbose, knowledge=knowledge, **ESCALATION)
         calls.append({"model": out["model"], "usage": out["usage"]})
     out.update({
         "route": level, "route_reason": reason, "escalated": escalated,

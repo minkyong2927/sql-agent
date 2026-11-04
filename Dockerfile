@@ -7,13 +7,21 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONIOENCODING=utf-8
 WORKDIR /app
 
 # 패키지 먼저 설치: 코드만 바뀌면 이 단계는 캐시를 재사용해 빌드가 빨라짐
-COPY requirements.txt .
+COPY requirements.txt requirements-rag.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+
+# 사내 문서 검색 방식: bm25 (키워드만, 기본) / hybrid (벡터+키워드, 메모리 약 700MB 필요)
+# hybrid 로 빌드: docker build --build-arg RAG_MODE=hybrid -t sql-agent .
+ARG RAG_MODE=bm25
+ENV RAG_MODE=${RAG_MODE}
+RUN if [ "$RAG_MODE" != "bm25" ]; then pip install --no-cache-dir -r requirements-rag.txt; fi
 
 COPY . .
 
 # 가상 데이터 DB를 이미지 안에 미리 만들어 둠 (실행 중에는 읽기 전용으로만 씀)
 RUN python schema.py && python seed.py
+# hybrid 면 임베딩 모델(0.5GB)을 이미지에 받아 두고 벡터 색인을 만듦 (실행 중에 내려받지 않게)
+RUN if [ "$RAG_MODE" != "bm25" ]; then python rag.py --build; fi
 
 # 관리자 권한이 아닌 일반 사용자로 실행
 RUN useradd --create-home appuser && chown -R appuser /app

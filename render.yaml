@@ -18,6 +18,9 @@ services:
         value: "10"
       - key: DAILY_LIMIT
         value: "100"
+      # 무료 인스턴스 메모리 512MB: 임베딩 모델 없이 키워드 검색만 (hybrid 는 약 700MB)
+      - key: RAG_MODE
+        value: bm25
       # 비밀 값: 파일에 적지 않고 Render 화면에서 직접 입력 (sync: false)
       - key: ANTHROPIC_API_KEY
         sync: false

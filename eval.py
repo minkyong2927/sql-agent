@@ -7,6 +7,7 @@ python eval.py --model claude-haiku-5-5
 python eval.py --judge               규칙 채점 + LLM 채점(judge.py) 함께
 python eval.py --model auto          난이도별 실행 예산(router.py)
 python eval.py --model cascade       분류 없이 Haiku로 시작, 실패할 때만 Opus
+python eval.py --set knowledge --knowledge none   사내 용어 문항을 문서 없이 (RAG 효과 비교)
 """
 import argparse
 import json
@@ -21,6 +22,9 @@ from pathlib import Path
 from agent import ask, con, to_text
 from pricing import KRW_PER_USD, cost_usd
 from questions import QUESTIONS
+from questions_knowledge import KNOWLEDGE_QUESTIONS
+
+SETS = {"base": QUESTIONS, "knowledge": KNOWLEDGE_QUESTIONS, "all": QUESTIONS + KNOWLEDGE_QUESTIONS}
 
 
 # ---------- 정답 ----------
@@ -127,21 +131,21 @@ def trace_of(out):
     return turns
 
 
-def run_case(q, model, use_judge=False, cache=True):
+def run_case(q, model, use_judge=False, cache=True, knowledge="rag"):
     start = time.time()
     if model in ("auto", "cascade"):
         from router import ask_auto
-        out = ask_auto(q["question"], verbose=False, route=model == "auto")
+        out = ask_auto(q["question"], verbose=False, route=model == "auto", knowledge=knowledge)
         cost = sum(cost_usd(c["model"], c["usage"]) for c in out["calls"])
     else:
-        out = ask(q["question"], model=model, verbose=False, cache=cache)
+        out = ask(q["question"], model=model, verbose=False, cache=cache, knowledge=knowledge)
         cost = cost_usd(out["model"], out["usage"])
     row = {
         "id": q["id"], "level": q["level"], "trap": q.get("trap"), "question": q["question"],
         "requested_model": model, "model": out["model"], "stop_reason": out["stop_reason"],
         "answer": out["answer"], "sql_count": len(out["sqls"]),
         "sql_errors": sum("error" in s for s in out["sqls"]),
-        "usage": out["usage"], "cost_usd": round(cost, 5),
+        "usage": out["usage"], "cost_usd": round(cost, 5), "docs": out.get("docs", []),
         "latency_s": round(time.time() - start, 1),
         **grade(q, out),
     }
@@ -159,8 +163,9 @@ def run_case(q, model, use_judge=False, cache=True):
 def self_check():
     """채점기 점검: 정답을 그대로 넣으면 100%, 빈 답이면 0%가 나와야 함"""
     oracle = null = wrong = 0
-    answerable = [q for q in QUESTIONS if q["sql"] is not None]
-    for i, q in enumerate(QUESTIONS):
+    questions = SETS["all"]
+    answerable = [q for q in questions if q["sql"] is not None]
+    for i, q in enumerate(questions):
         if q["sql"] is None:
             fake = {"answer": "요청하신 연령 정보는 DB에 없습니다.", "sqls": []}
         else:
@@ -178,7 +183,7 @@ def self_check():
         wrong += g["answer_ok"] or g["sql_ok"]
         if not grade(q, fake)["answer_ok"]:
             print("정답인데 틀림 처리:", q["id"], grade(q, fake)["missing"])
-    n = len(QUESTIONS)
+    n = len(questions)
     print(f"정답 그대로 제출   → {oracle}/{n} 통과 (기대: {n}/{n})")
     print(f"빈 답 제출         → {null}/{n} 통과 (기대: 0/{n})")
     print(f"다른 문항 답 제출  → {wrong}/{n} 통과 (기대: 0에 가까움)")
@@ -195,24 +200,27 @@ def main():
     ap.add_argument("--judge", action="store_true", help="LLM 채점도 함께 (Sonnet, 문항당 약 $0.004)")
     ap.add_argument("--no-cache", action="store_true", help="프롬프트 캐싱 끄기 (비교용)")
     ap.add_argument("--tag", default="", help="실행 폴더 이름 뒤에 붙일 설명")
+    ap.add_argument("--set", default="base", choices=SETS, help="base: 기본 40문항 / knowledge: 사내 용어 12문항 / all")
+    ap.add_argument("--knowledge", default="rag", choices=["rag", "full", "none"],
+                    help="사내 문서 넣는 방식 (rag: 검색한 조각만 / full: 전부 / none: 안 넣음)")
     args = ap.parse_args()
 
     if args.check:
         self_check()
         return
 
-    qs = QUESTIONS
+    qs = SETS[args.set]
     if args.ids:
         ids = {int(x) for x in args.ids.split(",")}
-        qs = [q for q in QUESTIONS if q["id"] in ids]
+        qs = [q for q in SETS["all"] if q["id"] in ids]
 
-    run_dir = Path("runs") / f"{datetime.now():%m%d-%H%M%S}_{args.model}{'-' + args.tag if args.tag else ''}"
+    run_dir = Path("runs") / f"{datetime.now():%m%d-%H%M%S}_{args.model}-{args.set}-{args.knowledge}{'-' + args.tag if args.tag else ''}"
     (run_dir / "traces").mkdir(parents=True, exist_ok=True)
     print(f"{len(qs)}문항 × {args.model} → {run_dir}")
 
     rows, start = [], time.time()
     with ThreadPoolExecutor(args.workers) as pool:
-        futures = {pool.submit(run_case, q, args.model, args.judge, not args.no_cache): q for q in qs}
+        futures = {pool.submit(run_case, q, args.model, args.judge, not args.no_cache, args.knowledge): q for q in qs}
         for f in as_completed(futures):
             q = futures[f]
             try:
@@ -238,7 +246,7 @@ def main():
     rows.sort(key=lambda r: r["id"])
     n = len(rows)
     total_cost = sum(r["cost_usd"] for r in rows)
-    lines = [f"# {args.model} — {n}문항", ""]
+    lines = [f"# {args.model} — {args.set} {n}문항 · 사내 문서 {args.knowledge}", ""]
     lines.append(f"- 답변 정답: **{sum(r['answer_ok'] for r in rows)}/{n}**")
     lines.append(f"- SQL 결과 정답: {sum(r['sql_ok'] for r in rows)}/{n}")
     if args.judge:
@@ -255,15 +263,17 @@ def main():
     if mismatch:
         lines.append(f"- 주의: 요청과 다른 모델이 답한 문항 {mismatch}")
     lines += ["", "| 난이도 | 답변 정답 | SQL 정답 |", "|---|---|---|"]
-    for level in ["쉬움", "보통", "어려움", "함정"]:
+    for level in ["쉬움", "보통", "어려움", "함정", "지식"]:
         lv = [r for r in rows if r["level"] == level]
         if lv:
             lines.append(f"| {level} | {sum(r['answer_ok'] for r in lv)}/{len(lv)} | {sum(r['sql_ok'] for r in lv)}/{len(lv)} |")
+    if args.knowledge != "none":
+        lines.append(f"- 붙인 문서 조각: 문항당 평균 {sum(len(r['docs']) for r in rows) / n:.2f}개")
     if args.model in ("auto", "cascade"):
         rc = sum(r["route_cost_usd"] for r in rows)
         lines.append(f"- 분류 비용: ${rc:.4f} (전체의 {rc / total_cost:.0%}), Opus 승급 {sum(r['escalated'] for r in rows)}건")
         lines += ["", "| 난이도 | simple 배정 | complex 배정 | Opus 승급 |", "|---|---|---|---|"]
-        for level in ["쉬움", "보통", "어려움", "함정"]:
+        for level in ["쉬움", "보통", "어려움", "함정", "지식"]:
             lv = [r for r in rows if r["level"] == level]
             if lv:
                 lines.append(f"| {level} | {sum(r['route'] == 'simple' for r in lv)} | "

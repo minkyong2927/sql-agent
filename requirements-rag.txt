@@ -1,0 +1,2 @@
+# 사내 문서 벡터 검색용 (RAG_MODE=hybrid 일 때만 설치)
+fastembed==0.9.1

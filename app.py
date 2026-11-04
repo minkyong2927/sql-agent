@@ -85,6 +85,7 @@ class AskResponse(BaseModel):
     input_tokens: int
     output_tokens: int
     latency_s: float
+    docs: list[str] = []  # 질문에 붙인 사내 문서 조각 (RAG)
 
 
 # ---------- 접속 제한 ----------
@@ -167,7 +168,7 @@ def answer(req, x_access_code, ip, rec):
     usage = out["usage"]
     rec.update(
         model=out["model"], stop_reason=out.get("stop_reason"),
-        n_sql=len(out["sqls"]), n_sql_error=sum("error" in s for s in out["sqls"]),
+        n_sql=len(out["sqls"]), n_sql_error=sum("error" in s for s in out["sqls"]), docs=out.get("docs", []),
         input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"],
         cache_read_tokens=usage.get("cache_read_input_tokens", 0),
         cache_write_tokens=usage.get("cache_creation_input_tokens", 0),
@@ -184,7 +185,7 @@ def answer(req, x_access_code, ip, rec):
     return AskResponse(
         answer=out["answer"], sqls=sqls, model=out["model"],
         input_tokens=out["usage"]["input_tokens"], output_tokens=out["usage"]["output_tokens"],
-        latency_s=round(time.time() - start, 1),
+        latency_s=round(time.time() - start, 1), docs=out.get("docs", []),
     )
 
 
@@ -228,7 +229,8 @@ $('go').onclick = async () => {
     const d = await r.json();
     if (!r.ok) throw new Error(d.detail || r.status);
     $('answer').textContent = d.answer;
-    $('meta').textContent = `${d.model} · ${d.latency_s}초 · 토큰 ${d.input_tokens}/${d.output_tokens}`;
+    $('meta').textContent = `${d.model} · ${d.latency_s}초 · 토큰 ${d.input_tokens}/${d.output_tokens}`
+      + (d.docs.length ? ` · 참고 문서: ${d.docs.join(', ')}` : '');
     d.sqls.forEach((s, i) => {
       const pre = document.createElement('pre');
       pre.textContent = `-- SQL ${i + 1}${s.error ? ' (오류: ' + s.error + ')' : ' · ' + s.row_count + '줄'}\\n${s.query.trim()}`;

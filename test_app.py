@@ -22,6 +22,7 @@ def fake_ask(question, model, verbose):
         "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 1000},
         "model": model,
         "stop_reason": "end_turn",
+        "docs": ["gift_policy#사은품 SLA 위반"],
     }
 
 
@@ -60,11 +61,13 @@ check("답변 전달", d["answer"] == "가짜 답변: 지연 건수?")
 check("SQL 결과 줄 (날짜는 글자로)", d["sqls"][0]["rows"] == [["67", "2026-10-25"]])
 check("SQL 오류 전달", d["sqls"][1]["error"] == "문법 오류")
 check("모델 지정", d["model"] == "claude-haiku-5-5")
+check("참고 문서 전달", d["docs"] == ["gift_policy#사은품 SLA 위반"])
 
 rec = json.loads(captured.lines[-1])
 check("로그: 한 줄 JSON + 응답 헤더와 같은 요청 번호", rec["request_id"] == r.headers["x-request-id"])
 check("로그: 상태·SQL 수·오류 수", (rec["status"], rec["n_sql"], rec["n_sql_error"]) == (200, 2, 1))
 check("로그: 비용 계산 (캐시 읽기 포함)", rec["cost_usd"] == round((10 * 0.10 + 5 * 0.50 + 1000 * 0.01) / 1e6, 6))
+check("로그: 참고 문서", rec["docs"] == ["gift_policy#사은품 SLA 위반"])
 check("로그: IP 원문 없음", "testclient" not in captured.lines[-1] and len(rec["ip"]) == 10)
 
 r = client.post("/ask", json={"question": "지연 건수?", "model": "gpt-5"})

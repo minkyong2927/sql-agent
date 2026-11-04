@@ -48,6 +48,14 @@ SYSTEM = f"""당신은 통신·렌탈 가입 중개 회사의 데이터 분석 �
 - 질문이 애매하면 합리적인 기준을 정해 실행하고, 답변 끝에 그 기준을 한 줄로 밝힙니다.
 - SQL 오류가 나면 오류 메시지를 보고 고쳐서 다시 실행합니다.
 - 답변은 짧게: 핵심 숫자 먼저, 필요하면 표.
+
+## 사내 문서
+- 사내 지표·정책 용어(예: 순가입, 골든타임 응대율, 청약철회, 고액 사은품)는 사내 문서에 정의가 있습니다.
+- 질문에 용어가 그대로 나오면 그 문서가 질문 앞 '참고 문서'로 붙어 옵니다. 그 정의를 따르고 답변 끝에 문서 이름을 밝힙니다.
+- 참고 문서가 없는데 테이블·칸·값만으로는 기준을 정할 수 없는 사내 표현(지표 이름, "수도권", "디지털 채널", "응대 안 한" 같은 묶음·상태)이 있으면
+  SQL을 짜기 전에 search_docs 로 정의를 찾습니다. 테이블·칸·값으로 바로 답할 수 있는 질문에는 검색하지 않습니다.
+- 질문이 DB에 있는 값('지연', '취소' 같은 status 값)을 그대로 말하면 문서보다 DB 값이 우선입니다.
+  예: "지급이 지연된 사은품"은 gift_payouts.status = '지연' 이지, 문서의 'SLA 위반'이 아닙니다.
 """
 
 TOOLS = [
@@ -65,6 +73,20 @@ TOOLS = [
         "strict": True,
     }
 ]
+
+DOC_TOOL = {
+    "name": "search_docs",
+    "description": "사내 문서(지표 정의서·운영 규칙·사은품 정책)에서 용어 정의를 검색해 관련 조각 3개를 돌려줍니다.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "찾을 용어나 표현 (예: '수도권', '응대 안 한 신청')"},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
 
 
 def run_sql(query):
@@ -85,14 +107,34 @@ def to_text(cols, rows):
     return text
 
 
-def ask(question, model="claude-opus-5-5", verbose=True, cache=True, effort="medium", max_steps=MAX_STEPS):
+def with_knowledge(question, knowledge):
+    """사내 문서를 질문 앞에 붙임 → (보낼 글, 붙인 조각 id 목록)
+    rag 는 문서 용어(소제목)가 질문에 그대로 나온 조각만 붙임. 비슷하기만 한 조각까지 붙이면
+    관계없는 질문의 해석이 흔들려서(기본 문항 10번: 문서 없이 3/3 → 붙이면 0/3) 나머지는 모델이 search_docs 로 찾게 함"""
+    if knowledge == "none":
+        return question, []
+    import rag  # 임베딩 모델이 무거워서 쓸 때만 불러옴
+    hits = [h for h in rag.search(question) if h["term"]] if knowledge == "rag" else rag.load_chunks()
+    if not hits:
+        return question, []
+    text = f"## 참고 문서 (사내 지식 검색 결과)\n{rag.to_prompt(hits)}\n\n## 질문\n{question}"
+    return text, [h["id"] for h in hits]
+
+
+def ask(question, model="claude-opus-5-5", verbose=True, cache=True, effort="medium", max_steps=MAX_STEPS,
+        knowledge="rag"):
     """질문 하나를 받아 답변·실행한 SQL과 결과·토큰 사용량을 돌려줌
-    effort·max_steps: 이 질문에 쓸 실행 예산 (router.py가 난이도에 따라 정함)"""
-    messages = [{"role": "user", "content": question}]
+    effort·max_steps: 이 질문에 쓸 실행 예산 (router.py가 난이도에 따라 정함)
+    knowledge: 사내 문서를 어떻게 넣을지 (rag: 용어 일치 조각 + search_docs 도구 / full: 전부 / none: 안 넣음)"""
+    content, docs = with_knowledge(question, knowledge)
+    if verbose and docs:
+        print(f"[참고 문서] {docs}")
+    messages = [{"role": "user", "content": content}]
     sqls = []  # [{"query", "cols", "rows"} 또는 {"query", "error"}]
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+    tools = TOOLS + [DOC_TOOL] if knowledge == "rag" else TOOLS
     out = {"answer": "SQL 실행 횟수 한도를 넘었습니다.", "sqls": sqls, "usage": usage,
-           "model": model, "stop_reason": "max_steps", "messages": messages}
+           "model": model, "stop_reason": "max_steps", "messages": messages, "docs": docs}
 
     # 안전 필터에 걸려 거절되면 서버가 다른 모델로 자동 재시도 (Opus만 지원, Haiku는 미지원)
     extra = {}
@@ -112,7 +154,7 @@ def ask(question, model="claude-opus-5-5", verbose=True, cache=True, effort="med
             model=model,
             max_tokens=16000,
             system=system,
-            tools=TOOLS,
+            tools=tools,
             messages=messages,
             output_config={"effort": effort},
             **extra,
@@ -130,12 +172,20 @@ def ask(question, model="claude-opus-5-5", verbose=True, cache=True, effort="med
             out["stop_reason"] = response.stop_reason
             return out
 
-        # AI가 요청한 SQL을 실행하고 결과를 돌려줌
+        # AI가 요청한 SQL을 실행하고 결과를 돌려줌 (문서 검색 요청이면 검색 결과)
         results = []
         for block in response.content:
             if block.type != "tool_use":
                 continue
             query = block.input["query"]
+            if block.name == "search_docs":
+                import rag
+                hits = rag.search(query, min_score=-1)  # 모델이 직접 찾은 것이라 기준 점수 없이 상위 3개
+                docs += [h["id"] for h in hits if h["id"] not in docs]
+                if verbose:
+                    print(f"\n[문서 검색] {query} → {[h['id'] for h in hits]}")
+                results.append({"type": "tool_result", "tool_use_id": block.id, "content": rag.to_prompt(hits)})
+                continue
             if verbose:
                 print(f"\n[SQL {len(sqls) + 1}]\n{query.strip()}")
             try:
