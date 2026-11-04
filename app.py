@@ -4,10 +4,15 @@
 문서:  http://127.0.0.1:8000/docs   (FastAPI가 자동으로 만들어 주는 API 시험 화면)
 화면:  http://127.0.0.1:8000/
 """
+import hashlib
 import hmac
+import json
+import logging
 import os
+import sys
 import threading
 import time
+import uuid
 from collections import deque
 
 import anthropic
@@ -16,6 +21,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from agent import ask
+from pricing import cost_usd
 
 # 배포 환경에서는 환경변수로 조정 (공개 시연은 Haiku만 + 접속 코드 + 횟수 제한)
 ALLOWED_MODELS = set(os.getenv("ALLOWED_MODELS", "claude-opus-5-5,claude-haiku-5-5").split(","))
@@ -26,6 +32,35 @@ DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "300"))       # 전체 하루 질문 
 PREVIEW_ROWS = 20  # 응답에 담을 SQL 결과 줄 수
 
 app = FastAPI(title="아정당 데이터 질의 에이전트", version="0.1.0")
+
+
+# ---------- 구조화 로그: 요청마다 JSON 한 줄 (Render 로그 화면·log_report.py로 집계) ----------
+
+log = logging.getLogger("sql-agent")
+log.setLevel(logging.INFO)
+log.propagate = False
+if not log.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    log.addHandler(_handler)
+
+
+def log_event(**fields):
+    log.info(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **fields}, ensure_ascii=False, default=str))
+
+
+def ip_hash(ip):
+    # IP 원문은 남기지 않음: 같은 사람인지 구분만 되게 짧은 해시로
+    return hashlib.sha256(ip.encode()).hexdigest()[:10]
+
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    # 응답 헤더(X-Request-ID)와 로그에 같은 번호 → 오류 신고가 오면 로그 한 줄을 바로 찾음
+    request.state.request_id = uuid.uuid4().hex[:12]
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
+    return response
 
 
 # ---------- 요청·응답 모양 (pydantic이 자동으로 검사) ----------
@@ -93,20 +128,51 @@ def health():
 
 @app.post("/ask", response_model=AskResponse)
 def ask_endpoint(req: AskRequest, request: Request, x_access_code: str = Header(default="")):
+    start = time.time()
+    ip = client_ip(request)
+    rec = {"event": "ask", "request_id": request.state.request_id, "ip": ip_hash(ip),
+           "question": req.question[:200], "model": req.model or DEFAULT_MODEL}
+    try:
+        resp = answer(req, x_access_code, ip, rec)
+        rec["status"] = 200
+        return resp
+    except HTTPException as e:
+        rec.update(status=e.status_code, error=e.detail)
+        raise
+    except Exception as e:
+        rec.update(status=500, error=type(e).__name__)
+        raise
+    finally:
+        rec["latency_s"] = round(time.time() - start, 2)
+        log_event(**rec)
+
+
+def answer(req, x_access_code, ip, rec):
+    """검사 → 에이전트 실행 → 응답. 로그에 남길 값은 rec 에 채움"""
+    start = time.time()
     if ACCESS_CODE and not hmac.compare_digest(x_access_code, ACCESS_CODE):
         raise HTTPException(401, "접속 코드가 맞지 않습니다")
     model = req.model or DEFAULT_MODEL
     if model not in ALLOWED_MODELS:
         raise HTTPException(400, f"model 은 {sorted(ALLOWED_MODELS)} 중 하나여야 합니다")
-    check_limits(client_ip(request))
+    check_limits(ip)
 
-    start = time.time()
     try:
         out = ask(req.question, model=model, verbose=False)
     except anthropic.RateLimitError:
         raise HTTPException(429, "요청이 많습니다. 잠시 후 다시 시도해 주세요")
     except anthropic.APIError as e:
         raise HTTPException(502, f"AI 호출 실패: {type(e).__name__}")
+
+    usage = out["usage"]
+    rec.update(
+        model=out["model"], stop_reason=out.get("stop_reason"),
+        n_sql=len(out["sqls"]), n_sql_error=sum("error" in s for s in out["sqls"]),
+        input_tokens=usage["input_tokens"], output_tokens=usage["output_tokens"],
+        cache_read_tokens=usage.get("cache_read_input_tokens", 0),
+        cache_write_tokens=usage.get("cache_creation_input_tokens", 0),
+        cost_usd=round(cost_usd(out["model"], usage), 6),
+    )
 
     sqls = []
     for s in out["sqls"]:

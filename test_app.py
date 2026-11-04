@@ -2,11 +2,14 @@
 
 python test_app.py
 """
+import json
+import logging
 from datetime import date
 
 from fastapi.testclient import TestClient
 
 import app as server
+from log_report import parse, report
 
 
 def fake_ask(question, model, verbose):
@@ -16,9 +19,24 @@ def fake_ask(question, model, verbose):
             {"query": "SELECT 1", "cols": ["n", "d"], "rows": [(67, date(2026, 10, 25))]},
             {"query": "SELEC", "error": "문법 오류"},
         ],
-        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 1000},
         "model": model,
+        "stop_reason": "end_turn",
     }
+
+
+class Capture(logging.Handler):
+    """서버가 찍는 JSON 로그 줄을 모아 둠"""
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
+
+
+captured = Capture()
+server.log.addHandler(captured)
 
 
 server.ask = fake_ask
@@ -43,6 +61,12 @@ check("SQL 결과 줄 (날짜는 글자로)", d["sqls"][0]["rows"] == [["67", "2
 check("SQL 오류 전달", d["sqls"][1]["error"] == "문법 오류")
 check("모델 지정", d["model"] == "claude-haiku-5-5")
 
+rec = json.loads(captured.lines[-1])
+check("로그: 한 줄 JSON + 응답 헤더와 같은 요청 번호", rec["request_id"] == r.headers["x-request-id"])
+check("로그: 상태·SQL 수·오류 수", (rec["status"], rec["n_sql"], rec["n_sql_error"]) == (200, 2, 1))
+check("로그: 비용 계산 (캐시 읽기 포함)", rec["cost_usd"] == round((10 * 0.10 + 5 * 0.50 + 1000 * 0.01) / 1e6, 6))
+check("로그: IP 원문 없음", "testclient" not in captured.lines[-1] and len(rec["ip"]) == 10)
+
 r = client.post("/ask", json={"question": "지연 건수?", "model": "gpt-5"})
 check("허용 안 된 모델 → 400", r.status_code == 400)
 
@@ -59,6 +83,8 @@ check("화면 HTML", r.status_code == 200 and "데이터 질의 에이전트" in
 server.ACCESS_CODE = "demo-code"
 r = client.post("/ask", json={"question": "지연 건수?"})
 check("접속 코드 없음 → 401", r.status_code == 401)
+rec = json.loads(captured.lines[-1])
+check("로그: 거절도 남김 (상태·사유)", rec["status"] == 401 and "접속 코드" in rec["error"] and "cost_usd" not in rec)
 r = client.post("/ask", json={"question": "지연 건수?"}, headers={"X-Access-Code": "wrong"})
 check("접속 코드 틀림 → 401", r.status_code == 401)
 r = client.post("/ask", json={"question": "지연 건수?", "model": "claude-haiku-5-5"},
@@ -79,6 +105,9 @@ server.DAILY_LIMIT = server._day["count"]
 r = client.post("/ask", json={"question": "지연 건수?", "model": "claude-haiku-5-5"},
                 headers={**ok_headers, "X-Forwarded-For": "3.3.3.3"})
 check("하루 전체 한도 초과 → 429", r.status_code == 429)
+
+summary = report(parse(["2026-11-04 10:00:00 INFO " + line for line in captured.lines] + ["uvicorn 접근 로그 줄"]))
+check("로그 집계: 요청·성공·429 건수", f"요청: {len(captured.lines)}건" in summary and "429" in summary)
 
 server.ALLOWED_MODELS = {"claude-haiku-5-5"}
 r = client.get("/")

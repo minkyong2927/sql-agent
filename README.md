@@ -24,8 +24,9 @@
 | `eval.py` | 평가 실행기: 답변 정답 / SQL 결과 정답 2종 채점, 병렬 실행, 문항별 결과·대화 기록 저장 |
 | `router.py` | 난이도 분류 → 모델·사고량·SQL 실행 한도 배정, 실패 시 Opus 승급 |
 | `judge.py` | LLM 채점기 (Sonnet 5.5): 핵심 값 일치 + 결론 명확성 판정, 알려진 정답·오답 162건으로 채점기 자체 검증 |
-| `app.py` | FastAPI 서버 (`POST /ask`, `GET /health`, 시연 화면 `/`) |
-| `test_*.py` | 안전장치 15건, API 17건, 승급 판단 7건 테스트 (API 테스트는 AI 호출을 가짜로 바꿔 무료) |
+| `app.py` | FastAPI 서버 (`POST /ask`, `GET /health`, 시연 화면 `/`), 요청마다 JSON 로그 한 줄 |
+| `pricing.py` / `log_report.py` | 토큰→비용 계산(평가·서버 공용) / 서버 로그 집계(응답 시간 p50·p95, 비용, 오류율) |
+| `test_*.py` | 안전장치 15건, API·로그 23건, 승급 판단 7건 테스트 (API 테스트는 AI 호출을 가짜로 바꿔 무료) |
 | `Dockerfile` / `render.yaml` | 컨테이너 이미지(빌드 시 DB 생성, 비root 실행) + Render 배포 설정 (접속 코드, IP당 시간 10회·하루 100회 제한) |
 
 ## 안전장치
@@ -114,6 +115,21 @@ Haiku가 질문을 simple / complex로 분류하고, 난이도마다 예산을 �
 - cascade 측정: auto보다 16% 싸고 2.2초 빠름, LLM 채점 40/40 유지. 승급 0건이라 사실상 Haiku 단독과 같은 비용·속도에 실패 시 안전망만 더한 구조. 규칙 채점 1건(Q10)은 비율 29.7%는 맞고 분모 해석(701 vs 761)만 다른 경우
 - 승급 판단 규칙은 `test_router.py`로 API 없이 테스트 (CI 포함)
 
+## 운영 로그
+
+`/ask` 요청마다 stdout에 JSON 한 줄. 거절(401·429)과 실패(502)도 남김. 응답 헤더 `X-Request-ID`와 같은 번호라 오류 신고가 오면 해당 줄을 바로 찾음
+
+```
+{"ts": "2026-11-04T13:36:48+0900", "event": "ask", "request_id": "544d6bb3a6c0", "ip": "846488f1dc",
+ "question": "통신사별 인터넷 가입 건수", "model": "claude-haiku-5-5", "stop_reason": "end_turn",
+ "n_sql": 1, "n_sql_error": 0, "input_tokens": 6, "output_tokens": 659, "cache_read_tokens": 3152,
+ "cache_write_tokens": 544, "cost_usd": 0.00043, "status": 200, "latency_s": 5.28}
+```
+
+- IP는 원문 대신 해시 10자리, 질문은 200자까지
+- `python log_report.py 로그파일`: Render 로그를 받아 요청 수·상태별 건수·응답 시간 p50/p95·비용·SQL 오류율·느린 요청 3건 집계
+- 평가(eval.py)와 서버가 같은 `pricing.py`로 비용을 계산 → 오프라인 측정값과 운영 비용을 같은 기준으로 비교
+
 ## 실행
 
 ```
@@ -132,6 +148,8 @@ python eval.py --model claude-haiku-5-5 # 평가 실행
 python eval.py --judge                  # LLM 채점까지 함께
 python judge.py --calibrate             # LLM 채점기 검증
 python eval.py --model auto             # 난이도별 실행 예산
+python eval.py --model cascade          # 실패 시에만 Opus 승급
+python log_report.py logs.txt           # 서버 로그 집계
 uvicorn app:app --reload                # http://127.0.0.1:8000
 ```
 

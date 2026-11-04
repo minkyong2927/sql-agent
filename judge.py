@@ -17,7 +17,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from agent import client, to_text
-from eval import KRW_PER_USD, answer_score, cost_usd, gold_result, grade
+from eval import answer_score, gold_result, grade
+from pricing import KRW_PER_USD, cost_usd
 from questions import QUESTIONS
 
 # 평가 대상(Opus·Haiku)과 다른 모델로 채점: 같은 모델이면 자기 답을 후하게 볼 수 있음
