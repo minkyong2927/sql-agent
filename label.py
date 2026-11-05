@@ -97,28 +97,29 @@ def kappa(pairs):
     return (po - pe) / (1 - pe) if pe < 1 else 1.0
 
 
-def report():
+def report(path=HUMAN):
+    """path: 채점 파일 (기본 사람 채점, labels/opus.jsonl 은 다른 모델이 같은 기준으로 블라인드 채점한 것)"""
     items = {it["no"]: it for it in load_jsonl(SAMPLE)}
-    labels = {r["no"]: r for r in load_jsonl(HUMAN)}  # 같은 건을 다시 채점했으면 마지막 것
+    labels = {r["no"]: r for r in load_jsonl(path)}  # 같은 건을 다시 채점했으면 마지막 것
     rows = [{**items[no], **lab} for no, lab in labels.items()]
     if not rows:
-        sys.exit("사람 채점이 없습니다. 먼저 python label.py")
-    lines = [f"# 사람 채점 대조 ({len(rows)}건)", "",
-             "| 채점기 | 사람과 일치 | 코헨 카파 | 사람 통과 · 채점기 실패 | 사람 실패 · 채점기 통과 |", "|---|---|---|---|---|"]
+        sys.exit(f"{path} 에 채점이 없습니다. 먼저 python label.py")
+    lines = [f"# 채점 대조: {path.name} ({len(rows)}건)", "",
+             "| 채점기 | 채점자와 일치 | 코헨 카파 | 채점자 통과 · 채점기 실패 | 채점자 실패 · 채점기 통과 |", "|---|---|---|---|---|"]
     for name, key in [("LLM 채점기 (Sonnet)", "judge_pass"), ("규칙 채점", "rule_pass")]:
         pairs = [(r["human_pass"], r[key]) for r in rows]
         lines.append(f"| {name} | {sum(a == b for a, b in pairs)}/{len(rows)} | {kappa(pairs):.2f} | "
                      f"{sum(a and not b for a, b in pairs)} | {sum(b and not a for a, b in pairs)} |")
-    lines.append(f"\n- 사람 기준 통과 {sum(r['human_pass'] for r in rows)}/{len(rows)}")
+    lines.append(f"\n- 채점자 기준 통과 {sum(r['human_pass'] for r in rows)}/{len(rows)}")
     diff = [r for r in rows if r["human_pass"] != r["judge_pass"]]
     if diff:
-        lines += ["", "## LLM 채점기와 사람이 다르게 본 답", ""]
+        lines += ["", "## LLM 채점기와 채점자가 다르게 본 답", ""]
         for r in sorted(diff, key=lambda r: r["no"]):
-            lines.append(f"- [{r['no']}] 문항 {r['id']} {r['question']} — 사람 {'O' if r['human_pass'] else 'X'}, "
+            lines.append(f"- [{r['no']}] 문항 {r['id']} {r['question']} — 채점자 {'O' if r['human_pass'] else 'X'}, "
                          f"LLM {'O' if r['judge_pass'] else 'X'}, 규칙 {'O' if r['rule_pass'] else 'X'}"
                          + (f" · 메모: {r['note']}" if r["note"] else ""))
     text = "\n".join(lines)
-    (LABEL_DIR / "report.md").write_text(text, encoding="utf-8")
+    (LABEL_DIR / f"report_{path.stem}.md").write_text(text, encoding="utf-8")
     print(text)
 
 
@@ -126,10 +127,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--sample", nargs="+", metavar="RUN_DIR")
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--labels", default=str(HUMAN), help="--report 에 쓸 채점 파일")
     args = ap.parse_args()
     if args.sample:
         sample(args.sample)
     elif args.report:
-        report()
+        report(Path(args.labels))
     else:
         label()

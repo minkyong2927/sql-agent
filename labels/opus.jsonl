@@ -1,0 +1,40 @@
+{"no": 1, "human_pass": true, "note": "84.6 일치, 문서 못 찾음"}
+{"no": 2, "human_pass": false, "note": "명단 없음으로 결론"}
+{"no": 3, "human_pass": false, "note": "명단 없음으로 결론"}
+{"no": 4, "human_pass": true, "note": "비율 29.7 일치, 분모 건수는 701 vs 761로 다름"}
+{"no": 5, "human_pass": false, "note": "81,044 ≠ 62,722"}
+{"no": 6, "human_pass": false, "note": "값을 내지 않음"}
+{"no": 7, "human_pass": false, "note": "67을 답으로"}
+{"no": 8, "human_pass": false, "note": "67~433 범위, 결론 없음"}
+{"no": 9, "human_pass": true, "note": ""}
+{"no": 10, "human_pass": false, "note": "67을 주 답, 433은 참고"}
+{"no": 11, "human_pass": false, "note": "21.81%를 주 답, 82.85는 참고"}
+{"no": 12, "human_pass": false, "note": "82,417 주 답, 62,722는 참고"}
+{"no": 13, "human_pass": true, "note": ""}
+{"no": 14, "human_pass": true, "note": "12.23 → 12.2"}
+{"no": 15, "human_pass": true, "note": ""}
+{"no": 16, "human_pass": false, "note": "값을 내지 않음"}
+{"no": 17, "human_pass": true, "note": "비율 일치, 분모 건수 다름"}
+{"no": 18, "human_pass": true, "note": ""}
+{"no": 19, "human_pass": true, "note": ""}
+{"no": 20, "human_pass": false, "note": "1명(한서우)으로 결론"}
+{"no": 21, "human_pass": true, "note": ""}
+{"no": 22, "human_pass": true, "note": ""}
+{"no": 23, "human_pass": true, "note": ""}
+{"no": 24, "human_pass": false, "note": "없음으로 결론"}
+{"no": 25, "human_pass": true, "note": ""}
+{"no": 26, "human_pass": false, "note": "21.8% 주 답, 82.8은 참고"}
+{"no": 27, "human_pass": true, "note": "844 주 답"}
+{"no": 28, "human_pass": true, "note": ""}
+{"no": 29, "human_pass": false, "note": "67·433 나열, 결론 없음"}
+{"no": 30, "human_pass": true, "note": "비율 일치, 분모 건수 다름"}
+{"no": 31, "human_pass": true, "note": ""}
+{"no": 32, "human_pass": true, "note": "82.85 → 82.8"}
+{"no": 33, "human_pass": false, "note": "82,417 주 답"}
+{"no": 34, "human_pass": false, "note": "없음으로 결론, 2년 기준 5명은 참고"}
+{"no": 35, "human_pass": true, "note": ""}
+{"no": 36, "human_pass": true, "note": ""}
+{"no": 37, "human_pass": false, "note": "82,417 주 답"}
+{"no": 38, "human_pass": true, "note": ""}
+{"no": 39, "human_pass": true, "note": ""}
+{"no": 40, "human_pass": true, "note": ""}
