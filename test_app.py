@@ -26,6 +26,25 @@ def fake_ask(question, model, verbose):
     }
 
 
+def fake_run(question, model, stream):
+    out = fake_ask(question, model, False)
+    yield "docs", out["docs"]
+    for s in out["sqls"]:
+        yield "sql", s
+    for piece in ["가짜 ", "답변"]:
+        yield "text", piece
+    yield "done", out
+
+
+def sse_events(text):
+    """SSE 본문 → [(event, data)]"""
+    events = []
+    for chunk in text.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in chunk.splitlines())
+        events.append((lines["event"], json.loads(lines["data"])))
+    return events
+
+
 class Capture(logging.Handler):
     """서버가 찍는 JSON 로그 줄을 모아 둠"""
     def __init__(self):
@@ -41,6 +60,7 @@ server.log.addHandler(captured)
 
 
 server.ask = fake_ask
+server.run = fake_run
 client = TestClient(server.app)
 
 checks = []
@@ -79,6 +99,16 @@ check("너무 긴 질문 → 422", r.status_code == 422)
 r = client.post("/ask", json={})
 check("질문 없음 → 422", r.status_code == 422)
 
+r = client.post("/ask/stream", json={"question": "지연 건수?", "model": "claude-haiku-5-5"})
+ev = sse_events(r.text)
+check("스트림: 200 + text/event-stream", r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream"))
+check("스트림: 문서 → SQL 2개 → 글자 → 완료 순서", [k for k, _ in ev] == ["docs", "sql", "sql", "text", "text", "done"])
+check("스트림: SQL 결과·오류 전달", ev[1][1]["rows"] == [["67", "2026-10-25"]] and ev[2][1]["error"] == "문법 오류")
+check("스트림: 완료 이벤트에 최종 답변", ev[-1][1]["answer"] == "가짜 답변: 지연 건수?")
+rec = json.loads(captured.lines[-1])
+check("스트림 로그: 상태·비용·첫 글자 시간", rec["event"] == "ask_stream" and rec["status"] == 200
+      and rec["cost_usd"] > 0 and rec["first_text_s"] is not None)
+
 r = client.get("/")
 check("화면 HTML", r.status_code == 200 and "데이터 질의 에이전트" in r.text)
 
@@ -88,6 +118,8 @@ r = client.post("/ask", json={"question": "지연 건수?"})
 check("접속 코드 없음 → 401", r.status_code == 401)
 rec = json.loads(captured.lines[-1])
 check("로그: 거절도 남김 (상태·사유)", rec["status"] == 401 and "접속 코드" in rec["error"] and "cost_usd" not in rec)
+r = client.post("/ask/stream", json={"question": "지연 건수?"})
+check("스트림도 접속 코드 없음 → 401 (스트림 시작 전)", r.status_code == 401)
 r = client.post("/ask", json={"question": "지연 건수?"}, headers={"X-Access-Code": "wrong"})
 check("접속 코드 틀림 → 401", r.status_code == 401)
 r = client.post("/ask", json={"question": "지연 건수?", "model": "claude-haiku-5-5"},

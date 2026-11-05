@@ -37,6 +37,9 @@ jobs:
       - name: 승급 판단 테스트
         run: python test_router.py
 
+      - name: 반복 측정·사람 채점 대조 계산 테스트
+        run: python test_stats.py
+
       - name: 채점기 점검 (정답 100%, 빈 답 0%)
         run: python eval.py --check
 

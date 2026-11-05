@@ -121,14 +121,16 @@ def with_knowledge(question, knowledge):
     return text, [h["id"] for h in hits]
 
 
-def ask(question, model="claude-opus-5-5", verbose=True, cache=True, effort="medium", max_steps=MAX_STEPS,
-        knowledge="rag"):
-    """질문 하나를 받아 답변·실행한 SQL과 결과·토큰 사용량을 돌려줌
+def run(question, model="claude-opus-5-5", cache=True, effort="medium", max_steps=MAX_STEPS,
+        knowledge="rag", stream=False):
+    """에이전트 실행 과정을 (종류, 값) 이벤트로 하나씩 내보냄. 마지막은 ("done", 결과)
+    종류: docs(붙인 문서) / step(모델 호출 시작) / text(답변 글자, stream=True 일 때만) /
+          search(문서 검색) / sql(SQL 실행 결과) / done
     effort·max_steps: 이 질문에 쓸 실행 예산 (router.py가 난이도에 따라 정함)
     knowledge: 사내 문서를 어떻게 넣을지 (rag: 용어 일치 조각 + search_docs 도구 / full: 전부 / none: 안 넣음)"""
     content, docs = with_knowledge(question, knowledge)
-    if verbose and docs:
-        print(f"[참고 문서] {docs}")
+    if docs:
+        yield "docs", list(docs)
     messages = [{"role": "user", "content": content}]
     sqls = []  # [{"query", "cols", "rows"} 또는 {"query", "error"}]
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
@@ -148,17 +150,20 @@ def ask(question, model="claude-opus-5-5", verbose=True, cache=True, effort="med
     if cache:
         system = [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}]
         extra["cache_control"] = {"type": "ephemeral"}
+    params = dict(model=model, max_tokens=16000, system=system, tools=tools, messages=messages,
+                  output_config={"effort": effort}, **extra)
 
-    for _ in range(max_steps):
-        response = client.beta.messages.create(
-            model=model,
-            max_tokens=16000,
-            system=system,
-            tools=tools,
-            messages=messages,
-            output_config={"effort": effort},
-            **extra,
-        )
+    for step in range(max_steps):
+        yield "step", step + 1
+        if stream:
+            # 스트리밍: 답변 글자를 생성되는 대로 내보내고, 끝나면 완성된 응답을 받음
+            with client.beta.messages.stream(**params) as s:
+                for event in s:
+                    if event.type == "text":
+                        yield "text", event.text
+                response = s.get_final_message()
+        else:
+            response = client.beta.messages.create(**params)
         usage["input_tokens"] += response.usage.input_tokens
         usage["output_tokens"] += response.usage.output_tokens
         usage["cache_read_input_tokens"] += response.usage.cache_read_input_tokens or 0
@@ -170,7 +175,8 @@ def ask(question, model="claude-opus-5-5", verbose=True, cache=True, effort="med
         if response.stop_reason != "tool_use":
             out["answer"] = "".join(b.text for b in response.content if b.type == "text")
             out["stop_reason"] = response.stop_reason
-            return out
+            yield "done", out
+            return
 
         # AI가 요청한 SQL을 실행하고 결과를 돌려줌 (문서 검색 요청이면 검색 결과)
         results = []
@@ -182,25 +188,36 @@ def ask(question, model="claude-opus-5-5", verbose=True, cache=True, effort="med
                 import rag
                 hits = rag.search(query, min_score=-1)  # 모델이 직접 찾은 것이라 기준 점수 없이 상위 3개
                 docs += [h["id"] for h in hits if h["id"] not in docs]
-                if verbose:
-                    print(f"\n[문서 검색] {query} → {[h['id'] for h in hits]}")
+                yield "search", {"query": query, "docs": [h["id"] for h in hits]}
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": rag.to_prompt(hits)})
                 continue
-            if verbose:
-                print(f"\n[SQL {len(sqls) + 1}]\n{query.strip()}")
             try:
                 cols, rows = run_sql(query)
                 sqls.append({"query": query, "cols": cols, "rows": rows})
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": to_text(cols, rows)})
             except (UnsafeSQL, duckdb.Error) as e:
-                if verbose:
-                    print(f"→ 오류: {e}")
                 sqls.append({"query": query, "error": str(e)})
                 results.append({"type": "tool_result", "tool_use_id": block.id,
                                 "content": f"오류: {e}", "is_error": True})
+            yield "sql", sqls[-1]
         messages.append({"role": "user", "content": results})
 
-    return out
+    yield "done", out
+
+
+def ask(question, model="claude-opus-5-5", verbose=True, cache=True, effort="medium", max_steps=MAX_STEPS,
+        knowledge="rag"):
+    """질문 하나를 받아 답변·실행한 SQL과 결과·토큰 사용량을 돌려줌 (run()을 끝까지 돌린 결과)"""
+    for kind, value in run(question, model, cache, effort, max_steps, knowledge):
+        if not verbose:
+            continue
+        if kind == "docs":
+            print(f"[참고 문서] {value}")
+        elif kind == "search":
+            print(f"\n[문서 검색] {value['query']} → {value['docs']}")
+        elif kind == "sql":
+            print(f"\n[SQL]\n{value['query'].strip()}" + (f"\n→ 오류: {value['error']}" if "error" in value else ""))
+    return value
 
 
 if __name__ == "__main__":

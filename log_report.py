@@ -23,7 +23,7 @@ def parse(lines):
             rec = json.loads(line[i:])
         except json.JSONDecodeError:
             continue
-        if isinstance(rec, dict) and rec.get("event") == "ask":
+        if isinstance(rec, dict) and rec.get("event") in ("ask", "ask_stream"):
             recs.append(rec)
     return recs
 

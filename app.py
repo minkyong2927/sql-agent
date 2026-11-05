@@ -17,10 +17,10 @@ from collections import deque
 
 import anthropic
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent import ask
+from agent import ask, run
 from pricing import cost_usd
 
 # 배포 환경에서는 환경변수로 조정 (공개 시연은 Haiku만 + 접속 코드 + 횟수 제한)
@@ -148,23 +148,32 @@ def ask_endpoint(req: AskRequest, request: Request, x_access_code: str = Header(
         log_event(**rec)
 
 
-def answer(req, x_access_code, ip, rec):
-    """검사 → 에이전트 실행 → 응답. 로그에 남길 값은 rec 에 채움"""
-    start = time.time()
+def precheck(req, x_access_code, ip):
+    """접속 코드·모델·횟수 검사 → 쓸 모델"""
     if ACCESS_CODE and not hmac.compare_digest(x_access_code, ACCESS_CODE):
         raise HTTPException(401, "접속 코드가 맞지 않습니다")
     model = req.model or DEFAULT_MODEL
     if model not in ALLOWED_MODELS:
         raise HTTPException(400, f"model 은 {sorted(ALLOWED_MODELS)} 중 하나여야 합니다")
     check_limits(ip)
+    return model
 
-    try:
-        out = ask(req.question, model=model, verbose=False)
-    except anthropic.RateLimitError:
-        raise HTTPException(429, "요청이 많습니다. 잠시 후 다시 시도해 주세요")
-    except anthropic.APIError as e:
-        raise HTTPException(502, f"AI 호출 실패: {type(e).__name__}")
 
+def api_error(e):
+    if isinstance(e, anthropic.RateLimitError):
+        return HTTPException(429, "요청이 많습니다. 잠시 후 다시 시도해 주세요")
+    return HTTPException(502, f"AI 호출 실패: {type(e).__name__}")
+
+
+def sql_run(s):
+    if "error" in s:
+        return SqlRun(query=s["query"], error=s["error"])
+    return SqlRun(query=s["query"], columns=s["cols"], row_count=len(s["rows"]),
+                  rows=[[str(v) for v in r] for r in s["rows"][:PREVIEW_ROWS]])
+
+
+def record(rec, out):
+    """로그에 남길 실행 결과 (모델·SQL 수·토큰·비용)"""
     usage = out["usage"]
     rec.update(
         model=out["model"], stop_reason=out.get("stop_reason"),
@@ -175,18 +184,76 @@ def answer(req, x_access_code, ip, rec):
         cost_usd=round(cost_usd(out["model"], usage), 6),
     )
 
-    sqls = []
-    for s in out["sqls"]:
-        if "error" in s:
-            sqls.append(SqlRun(query=s["query"], error=s["error"]))
-        else:
-            sqls.append(SqlRun(query=s["query"], columns=s["cols"], row_count=len(s["rows"]),
-                               rows=[[str(v) for v in r] for r in s["rows"][:PREVIEW_ROWS]]))
+
+def answer(req, x_access_code, ip, rec):
+    """검사 → 에이전트 실행 → 응답. 로그에 남길 값은 rec 에 채움"""
+    start = time.time()
+    model = precheck(req, x_access_code, ip)
+    try:
+        out = ask(req.question, model=model, verbose=False)
+    except anthropic.APIError as e:
+        raise api_error(e)
+    record(rec, out)
     return AskResponse(
-        answer=out["answer"], sqls=sqls, model=out["model"],
+        answer=out["answer"], sqls=[sql_run(s) for s in out["sqls"]], model=out["model"],
         input_tokens=out["usage"]["input_tokens"], output_tokens=out["usage"]["output_tokens"],
         latency_s=round(time.time() - start, 1), docs=out.get("docs", []),
     )
+
+
+def sse(kind, data):
+    return f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+@app.post("/ask/stream")
+def ask_stream_endpoint(req: AskRequest, request: Request, x_access_code: str = Header(default="")):
+    """/ask 와 같은 검사 후, 실행 과정을 SSE(text/event-stream)로 보냄
+    event: docs(붙인 문서) / search(문서 검색) / sql(SQL 실행 결과) / text(답변 글자 조각) / done(최종 결과) / error"""
+    start = time.time()
+    ip = client_ip(request)
+    rec = {"event": "ask_stream", "request_id": request.state.request_id, "ip": ip_hash(ip),
+           "question": req.question[:200], "model": req.model or DEFAULT_MODEL}
+    try:
+        model = precheck(req, x_access_code, ip)  # 거절은 스트림 시작 전에 일반 오류 응답으로
+    except HTTPException as e:
+        rec.update(status=e.status_code, error=e.detail, latency_s=round(time.time() - start, 2))
+        log_event(**rec)
+        raise
+
+    def events():
+        first_text = None
+        try:
+            for kind, value in run(req.question, model=model, stream=True):
+                if kind == "text":
+                    if first_text is None:
+                        first_text = round(time.time() - start, 2)
+                    yield sse("text", {"text": value})
+                elif kind == "sql":
+                    yield sse("sql", sql_run(value).model_dump())
+                elif kind in ("docs", "search"):
+                    yield sse(kind, value)
+                elif kind == "done":
+                    record(rec, value)
+                    rec["status"] = 200
+                    yield sse("done", {
+                        "answer": value["answer"], "model": value["model"], "docs": value.get("docs", []),
+                        "input_tokens": value["usage"]["input_tokens"],
+                        "output_tokens": value["usage"]["output_tokens"],
+                        "latency_s": round(time.time() - start, 1)})
+        except anthropic.APIError as e:
+            err = api_error(e)
+            rec.update(status=err.status_code, error=err.detail)
+            yield sse("error", {"status": err.status_code, "detail": err.detail})
+        except Exception as e:
+            rec.update(status=500, error=type(e).__name__)
+            yield sse("error", {"status": 500, "detail": "서버 오류"})
+        finally:
+            rec.update(latency_s=round(time.time() - start, 2), first_text_s=first_text)
+            log_event(**rec)
+
+    # X-Accel-Buffering: 프록시가 모아서 보내지 않고 바로 흘려보내게
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ---------- 시연용 화면 ----------
@@ -223,19 +290,40 @@ $('go').onclick = async () => {
   $('meta').textContent = ''; $('sqls').innerHTML = '';
   try {
     try { localStorage.setItem('code', $('code').value); } catch (e) {}
-    const r = await fetch('/ask', { method: 'POST',
+    // 스트리밍: SQL 실행·문서 검색은 일어나는 대로, 답변은 글자가 생성되는 대로 표시
+    const r = await fetch('/ask/stream', { method: 'POST',
                                     headers: { 'Content-Type': 'application/json', 'X-Access-Code': $('code').value },
                                     body: JSON.stringify({ question, model: $('m').value }) });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || r.status);
-    $('answer').textContent = d.answer;
-    $('meta').textContent = `${d.model} · ${d.latency_s}초 · 토큰 ${d.input_tokens}/${d.output_tokens}`
-      + (d.docs.length ? ` · 참고 문서: ${d.docs.join(', ')}` : '');
-    d.sqls.forEach((s, i) => {
-      const pre = document.createElement('pre');
-      pre.textContent = `-- SQL ${i + 1}${s.error ? ' (오류: ' + s.error + ')' : ' · ' + s.row_count + '줄'}\\n${s.query.trim()}`;
-      $('sqls').appendChild(pre);
-    });
+    if (!r.ok) { const d = await r.json(); throw new Error(d.detail || r.status); }
+    const reader = r.body.getReader(), decoder = new TextDecoder();
+    let buf = '', text = '', nSql = 0;
+    const handle = (kind, d) => {
+      if (kind === 'text') { text += d.text; $('answer').textContent = text; return; }
+      if (kind === 'sql' || kind === 'search') {
+        text = ''; $('answer').textContent = kind === 'sql' ? 'SQL 실행 중...' : '문서 검색 중...';
+        const pre = document.createElement('pre');
+        pre.textContent = kind === 'sql'
+          ? `-- SQL ${++nSql}${d.error ? ' (오류: ' + d.error + ')' : ' · ' + d.row_count + '줄'}\\n${d.query.trim()}`
+          : `-- 문서 검색: ${d.query} → ${d.docs.join(', ')}`;
+        $('sqls').appendChild(pre);
+      } else if (kind === 'done') {
+        $('answer').textContent = d.answer;
+        $('meta').textContent = `${d.model} · ${d.latency_s}초 · 토큰 ${d.input_tokens}/${d.output_tokens}`
+          + (d.docs.length ? ` · 참고 문서: ${d.docs.join(', ')}` : '');
+      } else if (kind === 'error') { throw new Error(d.detail); }
+    };
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\\n\\n')) >= 0) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        const kind = (chunk.match(/^event: (.+)$/m) || [])[1];
+        const data = (chunk.match(/^data: (.+)$/m) || [])[1];
+        if (kind && data) handle(kind, JSON.parse(data));
+      }
+    }
   } catch (e) { $('answer').textContent = '오류: ' + e.message; }
   $('go').disabled = false;
 };
